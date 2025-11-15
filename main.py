@@ -20,15 +20,15 @@ class FrameRequest(BaseModel):
 
 
 class VideoSection(BaseModel):
-    section_id: int
-    video_index: int  # Index in the video_urls list
+    section: int
+    video_id: int  # Index in the video_urls list
     start_time: float  # Start time in seconds
-    stop_time: float  # Stop time in seconds
+    end_time: float  # Stop time in seconds
 
 
 class ClipRequest(BaseModel):
     video_urls: List[str]  # List of video URLs
-    sections: List[VideoSection]  # Array of sections to clip
+    video_parts: List[VideoSection]  # Array of sections to clip
 
 
 def download_video(url: str) -> str:
@@ -125,7 +125,7 @@ async def extract_frame_from_video(request: FrameRequest):
             os.unlink(video_path)
 
 
-def clip_and_merge_videos(video_urls: List[str], sections: List[VideoSection]) -> bytes:
+def clip_and_merge_videos(video_urls: List[str], video_parts: List[VideoSection]) -> bytes:
     """Clip videos based on sections and merge them into one video."""
     downloaded_videos = []
     clip_files = []
@@ -138,25 +138,25 @@ def clip_and_merge_videos(video_urls: List[str], sections: List[VideoSection]) -
             downloaded_videos.append(video_path)
         
         # Validate video indices
-        for section in sections:
-            if section.video_index < 0 or section.video_index >= len(video_urls):
+        for section in video_parts:
+            if section.video_id < 0 or section.video_id >= len(video_urls):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Invalid video_index {section.video_index} for section {section.section_id}"
+                    detail=f"Invalid video_id {section.video_id} for section {section.section}"
                 )
-            if section.start_time < 0 or section.stop_time <= section.start_time:
+            if section.start_time < 0 or section.end_time <= section.start_time:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Invalid time range for section {section.section_id}"
+                    detail=f"Invalid time range for section {section.section}"
                 )
         
         # Clip each section
-        for section in sections:
-            video_path = downloaded_videos[section.video_index]
-            clip_path = os.path.join(temp_dir, f"clip_{section.section_id}.mp4")
+        for section in video_parts:
+            video_path = downloaded_videos[section.video_id]
+            clip_path = os.path.join(temp_dir, f"clip_{section.section}.mp4")
             
             # Use ffmpeg to clip the video
-            duration = section.stop_time - section.start_time
+            duration = section.end_time - section.start_time
             
             ffmpeg_cmd = [
                 "ffmpeg",
@@ -179,13 +179,13 @@ def clip_and_merge_videos(video_urls: List[str], sections: List[VideoSection]) -
             if result.returncode != 0:
                 raise HTTPException(
                     status_code=500,
-                    detail=f"Failed to clip section {section.section_id}: {result.stderr}"
+                    detail=f"Failed to clip section {section.section}: {result.stderr}"
                 )
             
             if not os.path.exists(clip_path):
                 raise HTTPException(
                     status_code=500,
-                    detail=f"Clip file not created for section {section.section_id}"
+                    detail=f"Clip file not created for section {section.section}"
                 )
             
             clip_files.append(clip_path)
@@ -273,10 +273,10 @@ async def clip_and_merge(request: ClipRequest):
     
     - **video_urls**: List of video URLs
     - **sections**: Array of sections with:
-      - section_id: Unique identifier for the section
-      - video_index: Index of the video in video_urls list (0-based)
+      - section: Unique identifier for the section
+      - video_id: Index of the video in video_urls list (0-based)
       - start_time: Start time in seconds
-      - stop_time: Stop time in seconds
+      - end_time: Stop time in seconds
     
     Returns: Merged video file (MP4)
     """
@@ -285,11 +285,11 @@ async def clip_and_merge(request: ClipRequest):
         if not request.video_urls:
             raise HTTPException(status_code=400, detail="video_urls cannot be empty")
         
-        if not request.sections:
-            raise HTTPException(status_code=400, detail="sections cannot be empty")
+        if not request.video_parts:
+            raise HTTPException(status_code=400, detail="video_parts cannot be empty")
         
         # Clip and merge videos
-        video_bytes = clip_and_merge_videos(request.video_urls, request.sections)
+        video_bytes = clip_and_merge_videos(request.video_urls, request.video_parts)
         
         return Response(
             content=video_bytes,
