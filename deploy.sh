@@ -55,7 +55,9 @@ gcloud run deploy ${SERVICE_NAME} \
     --memory 2Gi \
     --cpu 2 \
     --timeout 300 \
-    --max-instances 10
+    --max-instances 10 \
+    --min-instances 0 \
+    --port 8080
 
 # Get the service URL
 SERVICE_URL=$(gcloud run services describe ${SERVICE_NAME} --platform managed --region ${REGION} --format 'value(status.url)')

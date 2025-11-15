@@ -26,6 +26,8 @@ steps:
       - '2'
       - '--timeout'
       - '300'
+      - '--port'
+      - '8080'
 
 images:
   - 'gcr.io/$PROJECT_ID/video-frame-extractor:latest'
