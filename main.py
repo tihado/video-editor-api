@@ -5,9 +5,11 @@ import cv2
 import requests
 import tempfile
 import os
-from typing import Optional
+from typing import Optional, List
 import io
 from PIL import Image
+import subprocess
+import shutil
 
 app = FastAPI(title="Video Frame Extractor API")
 
@@ -15,6 +17,18 @@ app = FastAPI(title="Video Frame Extractor API")
 class FrameRequest(BaseModel):
     video_url: str
     time: float  # Time in seconds
+
+
+class VideoSection(BaseModel):
+    section_id: int
+    video_index: int  # Index in the video_urls list
+    start_time: float  # Start time in seconds
+    stop_time: float  # Stop time in seconds
+
+
+class ClipRequest(BaseModel):
+    video_urls: List[str]  # List of video URLs
+    sections: List[VideoSection]  # Array of sections to clip
 
 
 def download_video(url: str) -> str:
@@ -111,12 +125,190 @@ async def extract_frame_from_video(request: FrameRequest):
             os.unlink(video_path)
 
 
+def clip_and_merge_videos(video_urls: List[str], sections: List[VideoSection]) -> bytes:
+    """Clip videos based on sections and merge them into one video."""
+    downloaded_videos = []
+    clip_files = []
+    temp_dir = tempfile.mkdtemp()
+    
+    try:
+        # Download all videos
+        for i, url in enumerate(video_urls):
+            video_path = download_video(url)
+            downloaded_videos.append(video_path)
+        
+        # Validate video indices
+        for section in sections:
+            if section.video_index < 0 or section.video_index >= len(video_urls):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid video_index {section.video_index} for section {section.section_id}"
+                )
+            if section.start_time < 0 or section.stop_time <= section.start_time:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid time range for section {section.section_id}"
+                )
+        
+        # Clip each section
+        for section in sections:
+            video_path = downloaded_videos[section.video_index]
+            clip_path = os.path.join(temp_dir, f"clip_{section.section_id}.mp4")
+            
+            # Use ffmpeg to clip the video
+            duration = section.stop_time - section.start_time
+            
+            ffmpeg_cmd = [
+                "ffmpeg",
+                "-i", video_path,
+                "-ss", str(section.start_time),
+                "-t", str(duration),
+                "-c", "copy",  # Copy codec for speed
+                "-avoid_negative_ts", "make_zero",
+                "-y",  # Overwrite output file
+                clip_path
+            ]
+            
+            result = subprocess.run(
+                ffmpeg_cmd,
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            
+            if result.returncode != 0:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to clip section {section.section_id}: {result.stderr}"
+                )
+            
+            if not os.path.exists(clip_path):
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Clip file not created for section {section.section_id}"
+                )
+            
+            clip_files.append(clip_path)
+        
+        # Create file list for ffmpeg concat
+        concat_file = os.path.join(temp_dir, "concat_list.txt")
+        with open(concat_file, "w") as f:
+            for clip_file in clip_files:
+                f.write(f"file '{clip_file}'\n")
+        
+        # Merge all clips using ffmpeg concat
+        output_path = os.path.join(temp_dir, "merged_video.mp4")
+        
+        merge_cmd = [
+            "ffmpeg",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", concat_file,
+            "-c", "copy",
+            "-y",
+            output_path
+        ]
+        
+        result = subprocess.run(
+            merge_cmd,
+            capture_output=True,
+            text=True,
+            timeout=600
+        )
+        
+        if result.returncode != 0:
+            # If copy codec fails, try re-encoding
+            merge_cmd_reencode = [
+                "ffmpeg",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", concat_file,
+                "-c:v", "libx264",
+                "-c:a", "aac",
+                "-preset", "fast",
+                "-y",
+                output_path
+            ]
+            
+            result = subprocess.run(
+                merge_cmd_reencode,
+                capture_output=True,
+                text=True,
+                timeout=600
+            )
+            
+            if result.returncode != 0:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to merge videos: {result.stderr}"
+                )
+        
+        # Read the merged video
+        if not os.path.exists(output_path):
+            raise HTTPException(status_code=500, detail="Merged video file not created")
+        
+        with open(output_path, "rb") as f:
+            video_bytes = f.read()
+        
+        return video_bytes
+        
+    finally:
+        # Clean up all temporary files
+        for video_path in downloaded_videos:
+            if os.path.exists(video_path):
+                os.unlink(video_path)
+        
+        for clip_file in clip_files:
+            if os.path.exists(clip_file):
+                os.unlink(clip_file)
+        
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+
+
+@app.post("/clip-and-merge", response_class=Response)
+async def clip_and_merge(request: ClipRequest):
+    """
+    Clip videos based on sections and merge them into one video.
+    
+    - **video_urls**: List of video URLs
+    - **sections**: Array of sections with:
+      - section_id: Unique identifier for the section
+      - video_index: Index of the video in video_urls list (0-based)
+      - start_time: Start time in seconds
+      - stop_time: Stop time in seconds
+    
+    Returns: Merged video file (MP4)
+    """
+    try:
+        # Validate input
+        if not request.video_urls:
+            raise HTTPException(status_code=400, detail="video_urls cannot be empty")
+        
+        if not request.sections:
+            raise HTTPException(status_code=400, detail="sections cannot be empty")
+        
+        # Clip and merge videos
+        video_bytes = clip_and_merge_videos(request.video_urls, request.sections)
+        
+        return Response(
+            content=video_bytes,
+            media_type="video/mp4",
+            headers={"Content-Disposition": "attachment; filename=merged_video.mp4"}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
 @app.get("/")
 async def root():
     return {
         "message": "Video Frame Extractor API",
         "endpoints": {
-            "POST /extract-frame": "Extract a frame from a video URL at a specific time"
+            "POST /extract-frame": "Extract a frame from a video URL at a specific time",
+            "POST /clip-and-merge": "Clip videos based on sections and merge into one video"
         }
     }
 

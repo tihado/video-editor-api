@@ -2,10 +2,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies for OpenCV (headless version doesn't need OpenGL)
+# Install system dependencies for OpenCV and ffmpeg
 RUN apt-get update && apt-get install -y \
     libglib2.0-0 \
     libgomp1 \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install Python dependencies
